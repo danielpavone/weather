@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { WeatherPanel } from '@/components/WeatherPanel'
+import { getApiHealth } from '@/lib/api'
 
 type ApiStatus = 'checking' | 'online' | 'offline'
 
@@ -7,46 +9,39 @@ function App() {
 
   useEffect(() => {
     const checkApiStatus = async () => {
-      try {
-        const response = await fetch('http://localhost:3000/health')
-        if (response.ok) {
-          setApiStatus('online')
-        } else {
-          setApiStatus('offline')
-        }
-      } catch {
-        setApiStatus('offline')
-      }
+      const online = await getApiHealth()
+      setApiStatus(online ? 'online' : 'offline')
     }
 
-    checkApiStatus()
-    const interval = setInterval(checkApiStatus, 5000)
+    void checkApiStatus()
+    const interval = setInterval(() => {
+      void checkApiStatus()
+    }, 5000)
 
     return () => clearInterval(interval)
   }, [])
 
-  const getStatusColor = () => {
-    switch (apiStatus) {
-      case 'online':
-        return 'bg-green-500'
-      case 'offline':
-        return 'bg-red-500'
-      case 'checking':
-        return 'bg-yellow-500'
-      default:
-        return 'bg-gray-500'
-    }
-  }
+  const statusColor = apiStatus === 'online'
+    ? 'bg-green-500'
+    : apiStatus === 'offline'
+      ? 'bg-red-500'
+      : 'bg-yellow-500'
+
+  const statusLabel = apiStatus === 'online'
+    ? 'API online'
+    : apiStatus === 'offline'
+      ? 'API offline'
+      : 'Verificando API'
 
   return (
-    <div className="min-h-screen bg-background flex flex-col items-center justify-center relative">
-      <h1 className="text-6xl font-bold text-foreground">
-        template
-      </h1>
+    <div className="min-h-screen bg-gradient-to-b from-sky-100 via-background to-background">
+      <main className="mx-auto flex min-h-screen w-full max-w-xl flex-col items-center px-4 pb-24 pt-10 sm:pt-16">
+        <WeatherPanel />
+      </main>
 
-      <div className="absolute bottom-8 flex items-center gap-2 px-4 py-2 bg-secondary/50 rounded-full backdrop-blur-sm">
-        <div className={`w-3 h-3 rounded-full ${getStatusColor()} animate-pulse`}></div>
-        <span className="text-sm text-muted-foreground font-medium">API Status</span>
+      <div className="fixed bottom-6 left-1/2 flex -translate-x-1/2 items-center gap-2 rounded-full bg-secondary/80 px-4 py-2 shadow-sm backdrop-blur-sm">
+        <div className={`h-2.5 w-2.5 rounded-full ${statusColor} ${apiStatus === 'checking' ? 'animate-pulse' : ''}`} />
+        <span className="text-sm font-medium text-muted-foreground">{statusLabel}</span>
       </div>
     </div>
   )

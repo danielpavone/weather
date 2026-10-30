@@ -6,7 +6,7 @@
     "dev": "nodemon --exec tsx src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "tsc -p tsconfig.test.json --noEmit && vitest run"
   },
   "keywords": [],
   "author": "",
@@ -16,9 +16,12 @@
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/node": "^24.3.0",
+    "@types/supertest": "^7.2.1",
     "nodemon": "^3.1.10",
+    "supertest": "^7.3.1",
     "tsx": "^4.20.5",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "^5.0.5"
   },
   "dependencies": {
     "cors": "^2.8.5",
