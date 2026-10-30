@@ -174,6 +174,6 @@ npm test
 npm run build
 ```
 
-Os testes do backend usam Vitest e mockam a Open-Meteo e o Nominatim: sucesso, cidade inexistente, falha externa, entrada inválida, cache, limite de consultas, CORS e falha da geocodificação reversa (rede ou HTTP), caso em que o clima ainda é retornado.
+Os testes do backend usam Vitest e mockam a Open-Meteo e o Nominatim: sucesso, cidade inexistente, falha externa, entrada inválida, cache LRU (teto e expiração), fila cheia do Nominatim, limite de consultas por IP com `TRUST_PROXY`, CORS e falha da geocodificação reversa (rede ou HTTP), caso em que o clima ainda é retornado.
 
 Os testes do frontend usam Vitest e Testing Library. Cobrem `getWeather` (query, mensagem do backend, resposta inválida e falha de rede), o hook `useWeather` e o `WeatherPanel` (carregamento, erro, sucesso e geolocalização negada).
