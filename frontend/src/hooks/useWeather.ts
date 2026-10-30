@@ -102,7 +102,7 @@ export function useWeather() {
         }
 
         if (silent) {
-          setStatus((current) => (current === 'loading' ? 'idle' : current))
+          setStatus('idle')
           return
         }
 

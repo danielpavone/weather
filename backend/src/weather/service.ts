@@ -1,10 +1,13 @@
 import { HttpError } from '../httpError';
 import { describeWeatherCode } from './descriptions';
+import { createRequestGate } from './requestGate';
 import type { WeatherQuery, WeatherReport } from './types';
 
 const GEOCODING_API_URL = 'https://geocoding-api.open-meteo.com/v1/search';
 const FORECAST_API_URL = 'https://api.open-meteo.com/v1/forecast';
 const REVERSE_GEOCODING_API_URL = 'https://nominatim.openstreetmap.org/reverse';
+const DEFAULT_NOMINATIM_USER_AGENT = 'weather-dashboard/1.0 (https://github.com/danielpavone/weather)';
+const MAX_CITY_LENGTH = 100;
 const CURRENT_FIELDS = [
   'temperature_2m',
   'apparent_temperature',
@@ -14,8 +17,76 @@ const CURRENT_FIELDS = [
   'is_day',
 ].join(',');
 const REQUEST_TIMEOUT_MS = 10000;
+const DEFAULT_WEATHER_CACHE_TTL_MS = 10 * 60 * 1000;
+const DEFAULT_REVERSE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_NOMINATIM_INTERVAL_MS = 1000;
 const EXTERNAL_FAILURE_MESSAGE =
   'Não foi possível consultar o serviço de clima. Tente novamente em instantes.';
+
+interface CacheEntry<T> {
+  value: T;
+  expiresAt: number;
+}
+
+const weatherCache = new Map<string, CacheEntry<WeatherReport>>();
+const reverseCache = new Map<string, CacheEntry<Pick<ResolvedPlace, 'name' | 'country' | 'admin1'>>>();
+const scheduleNominatim = createRequestGate(() => readNonNegativeInt(
+  process.env.NOMINATIM_MIN_INTERVAL_MS,
+  DEFAULT_NOMINATIM_INTERVAL_MS,
+));
+
+function readNonNegativeInt(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') {
+    return fallback;
+  }
+
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) {
+    return fallback;
+  }
+
+  return value;
+}
+
+function readCache<T>(cache: Map<string, CacheEntry<T>>, key: string): T | undefined {
+  const entry = cache.get(key);
+  if (!entry) {
+    return undefined;
+  }
+
+  if (entry.expiresAt <= Date.now()) {
+    cache.delete(key);
+    return undefined;
+  }
+
+  return entry.value;
+}
+
+function writeCache<T>(cache: Map<string, CacheEntry<T>>, key: string, value: T, ttlMs: number): void {
+  if (ttlMs <= 0) {
+    return;
+  }
+
+  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+}
+
+function cityCacheKey(city: string): string {
+  return `city:${city.toLocaleLowerCase('pt-BR')}`;
+}
+
+function coordinateCacheKey(latitude: number, longitude: number): string {
+  return `coords:${latitude.toFixed(2)}:${longitude.toFixed(2)}`;
+}
+
+function nominatimUserAgent(): string {
+  const configured = process.env.NOMINATIM_USER_AGENT?.trim();
+  return configured ? configured : DEFAULT_NOMINATIM_USER_AGENT;
+}
+
+export function clearWeatherCache(): void {
+  weatherCache.clear();
+  reverseCache.clear();
+}
 
 interface GeocodingMatch {
   name?: unknown;
@@ -156,7 +227,7 @@ async function geocodeCity(city: string): Promise<ResolvedPlace> {
   };
 }
 
-async function reverseGeocode(
+async function requestReverseGeocode(
   latitude: number,
   longitude: number,
 ): Promise<Pick<ResolvedPlace, 'name' | 'country' | 'admin1'> | null> {
@@ -171,7 +242,7 @@ async function reverseGeocode(
     const response = await fetch(url, {
       headers: {
         Accept: 'application/json',
-        'User-Agent': 'weather-dashboard/1.0 (educational)',
+        'User-Agent': nominatimUserAgent(),
       },
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
@@ -205,6 +276,29 @@ async function reverseGeocode(
   } catch {
     return null;
   }
+}
+
+async function reverseGeocode(
+  latitude: number,
+  longitude: number,
+): Promise<Pick<ResolvedPlace, 'name' | 'country' | 'admin1'> | null> {
+  const key = coordinateCacheKey(latitude, longitude);
+  const cached = readCache(reverseCache, key);
+  if (cached) {
+    return cached;
+  }
+
+  const place = await scheduleNominatim(() => requestReverseGeocode(latitude, longitude));
+  if (place) {
+    writeCache(
+      reverseCache,
+      key,
+      place,
+      readNonNegativeInt(process.env.REVERSE_GEOCODE_CACHE_TTL_MS, DEFAULT_REVERSE_CACHE_TTL_MS),
+    );
+  }
+
+  return place;
 }
 
 async function fetchForecast(
@@ -283,13 +377,33 @@ function toReport(
   };
 }
 
+function rememberWeather(key: string, report: WeatherReport): WeatherReport {
+  writeCache(
+    weatherCache,
+    key,
+    report,
+    readNonNegativeInt(process.env.WEATHER_CACHE_TTL_MS, DEFAULT_WEATHER_CACHE_TTL_MS),
+  );
+  return report;
+}
+
 export async function getCurrentWeather(query: WeatherQuery): Promise<WeatherReport> {
   const city = query.city.trim();
 
+  if (city.length > MAX_CITY_LENGTH) {
+    throw new HttpError(400, 'O nome da cidade pode ter no máximo 100 caracteres.');
+  }
+
   if (city.length >= 2) {
+    const key = cityCacheKey(city);
+    const cached = readCache(weatherCache, key);
+    if (cached) {
+      return cached;
+    }
+
     const place = await geocodeCity(city);
     const forecast = await fetchForecast(place.latitude, place.longitude, place.timezone);
-    return toReport(place, forecast);
+    return rememberWeather(key, toReport(place, forecast));
   }
 
   if (city.length === 1) {
@@ -307,12 +421,18 @@ export async function getCurrentWeather(query: WeatherQuery): Promise<WeatherRep
     throw new HttpError(400, 'Informe latitude e longitude juntas.');
   }
 
+  const key = coordinateCacheKey(latitude, longitude);
+  const cached = readCache(weatherCache, key);
+  if (cached) {
+    return cached;
+  }
+
   const [place, forecast] = await Promise.all([
     reverseGeocode(latitude, longitude),
     fetchForecast(latitude, longitude, null),
   ]);
 
-  return toReport(
+  const report = toReport(
     {
       name: place?.name ?? null,
       country: place?.country ?? null,
@@ -323,4 +443,10 @@ export async function getCurrentWeather(query: WeatherQuery): Promise<WeatherRep
     },
     forecast,
   );
+
+  if (!place) {
+    return report;
+  }
+
+  return rememberWeather(key, report);
 }

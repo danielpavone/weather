@@ -68,7 +68,36 @@ curl "http://localhost:3000/api/weather?city=S%C3%A3o%20Paulo"
 curl "http://localhost:3000/api/weather?latitude=-23.55&longitude=-46.63"
 ```
 
-Quando só há coordenadas, o backend busca o clima na Open-Meteo e tenta resolver o nome da cidade com a geocodificação reversa do OpenStreetMap. Se essa etapa falhar, o clima ainda é retornado e `location.name` vem `null`.
+Quando só há coordenadas, o backend busca o clima na Open-Meteo e tenta resolver o nome da cidade no [Nominatim](https://nominatim.org/) (OpenStreetMap). Se essa etapa falhar, o clima ainda é retornado e `location.name` vem `null`.
+
+### Nominatim
+
+A geocodificação reversa usa `https://nominatim.openstreetmap.org/reverse` apenas no fluxo de latitude/longitude. A [política de uso](https://operations.osmfoundation.org/policies/nominatim/) exige no máximo uma requisição por segundo, um User-Agent que identifique a aplicação e atribuição aos dados do OpenStreetMap.
+
+O backend aplica isso assim:
+
+- fila interna com intervalo mínimo de 1 segundo entre chamadas (`NOMINATIM_MIN_INTERVAL_MS`, padrão `1000`);
+- User-Agent padrão `weather-dashboard/1.0 (https://github.com/danielpavone/weather)`, substituível por `NOMINATIM_USER_AGENT`;
+- cache do nome resolvido por coordenada arredondada (`REVERSE_GEOCODE_CACHE_TTL_MS`, padrão 24 horas);
+- se o Nominatim falhar ou recusar a chamada, o clima da Open-Meteo continua sendo respondido.
+
+Atribuição: dados de localização © colaboradores do OpenStreetMap.
+
+### Cache, limite e CORS
+
+Consultas repetidas à Open-Meteo ficam em cache por cidade (sem diferenciar maiúsculas) ou por coordenada arredondada a duas casas. O tempo padrão é 10 minutos (`WEATHER_CACHE_TTL_MS`).
+
+`GET /api/weather` também tem limite por IP: 30 requisições por minuto (`WEATHER_RATE_LIMIT_MAX` e `WEATHER_RATE_LIMIT_WINDOW_MS`). Acima disso a resposta é `429`.
+
+O CORS não reflete qualquer origem. Sem configuração, aceita só `http://localhost:5173` e `http://127.0.0.1:5173`. Em produção defina origens explícitas:
+
+```bash
+CORS_ORIGIN=https://clima.example
+```
+
+Várias origens podem ser separadas por vírgula. O valor `*` é recusado.
+
+O backend também envia cabeçalhos do Helmet. A política `Cross-Origin-Resource-Policy` fica `cross-origin` para o painel, em outra porta, conseguir ler a API.
 
 ### Resposta
 
@@ -107,9 +136,12 @@ Quando só há coordenadas, o backend busca o clima na Open-Meteo e tenta resolv
 | --- | --- | --- |
 | Cidade ausente ou em branco, sem coordenadas | 400 | Informe o nome de uma cidade. |
 | Cidade com um caractere | 400 | Informe pelo menos 2 caracteres para buscar uma cidade. |
+| Cidade com mais de 100 caracteres | 400 | O nome da cidade pode ter no máximo 100 caracteres. |
 | Latitude ou longitude inválida | 400 | Latitude ou longitude inválida. |
 | Cidade não encontrada | 404 | Não encontramos essa cidade. Verifique o nome e tente novamente. |
 | Falha da API externa | 502 | Não foi possível consultar o serviço de clima. Tente novamente em instantes. |
+| Muitas consultas no intervalo | 429 | Muitas consultas em pouco tempo. Tente novamente em instantes. |
+| Erro inesperado | 500 | Erro interno do servidor. |
 
 O corpo do erro é `{ "message": "..." }`.
 
@@ -117,15 +149,22 @@ O health check continua em `GET /health`.
 
 ## Testes e build
 
+O workflow de CI (`.github/workflows/ci.yml`) roda, no backend e no frontend, lint, typecheck, testes e build.
+
 ```bash
 cd backend
+npm run lint
+npm run typecheck
 npm test
 npm run build
 
 cd ../frontend
 npm run lint
 npm run typecheck
+npm test
 npm run build
 ```
 
-Os testes do backend usam Vitest e mockam as chamadas à Open-Meteo (sucesso, cidade inexistente, falha externa e entrada inválida) e o fluxo por coordenadas.
+Os testes do backend usam Vitest e mockam a Open-Meteo e o Nominatim: sucesso, cidade inexistente, falha externa, entrada inválida, cache, limite de consultas, CORS e falha da geocodificação reversa (rede ou HTTP), caso em que o clima ainda é retornado.
+
+Os testes do frontend usam Vitest e Testing Library. Cobrem `getWeather` (query, mensagem do backend, resposta inválida e falha de rede), o hook `useWeather` e o `WeatherPanel` (carregamento, erro, sucesso e geolocalização negada).

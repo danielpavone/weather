@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../src/app';
+import { clearWeatherCache } from '../src/weather/service';
 
 const app = createApp();
 
@@ -82,6 +83,7 @@ function mockOpenMeteo(options?: {
 }
 
 afterEach(() => {
+  clearWeatherCache();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -226,7 +228,7 @@ describe('GET /api/weather', () => {
   });
 
   it('mantém o clima por coordenadas quando a geocodificação reversa falha', async () => {
-    mockOpenMeteo({
+    const fetchMock = mockOpenMeteo({
       reverse: new Error('nominatim down'),
     });
 
@@ -237,5 +239,62 @@ describe('GET /api/weather', () => {
     expect(response.status).toBe(200);
     expect(response.body.location.name).toBeNull();
     expect(response.body.current.description).toBe('Parcialmente nublado');
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('api.open-meteo.com'))).toBe(true);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('nominatim.openstreetmap.org'))).toBe(true);
+  });
+
+  it('mantém o clima quando o Nominatim responde com erro HTTP', async () => {
+    const fetchMock = mockOpenMeteo({
+      reverse: jsonResponse({ error: 'rate limited' }, 429),
+    });
+
+    const response = await request(app)
+      .get('/api/weather')
+      .query({ latitude: '48.86', longitude: '2.35' });
+
+    expect(response.status).toBe(200);
+    expect(response.body.location.name).toBeNull();
+    expect(response.body.current.temperature).toBe(27.2);
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('nominatim.openstreetmap.org'))).toBe(true);
+  });
+
+  it('envia User-Agent identificável ao Nominatim', async () => {
+    const fetchMock = mockOpenMeteo();
+
+    const response = await request(app)
+      .get('/api/weather')
+      .query({ latitude: '-22.90', longitude: '-43.17' });
+
+    expect(response.status).toBe(200);
+    const nominatimCall = fetchMock.mock.calls.find((call) => String(call[0]).includes('nominatim.openstreetmap.org'));
+    const init = nominatimCall?.[1] as { headers?: Record<string, string> } | undefined;
+
+    expect(init?.headers?.['User-Agent']).toBe(
+      'weather-dashboard/1.0 (https://github.com/danielpavone/weather)',
+    );
+  });
+
+  it('reaproveita o cache e não chama a Open-Meteo de novo para a mesma cidade', async () => {
+    const fetchMock = mockOpenMeteo();
+
+    const first = await request(app).get('/api/weather').query({ city: 'São Paulo' });
+    const second = await request(app).get('/api/weather').query({ city: 'são paulo' });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(second.body).toEqual(first.body);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('responde 400 quando o nome da cidade é longo demais', async () => {
+    const fetchMock = mockOpenMeteo();
+
+    const response = await request(app)
+      .get('/api/weather')
+      .query({ city: 'a'.repeat(101) });
+
+    expect(response.status).toBe(400);
+    expect(response.body.message).toBe('O nome da cidade pode ter no máximo 100 caracteres.');
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });
