@@ -18,5 +18,22 @@ export function resolveCorsOrigins(raw: string | undefined = process.env.CORS_OR
     return [...DEFAULT_DEV_ORIGINS];
   }
 
+  for (const origin of origins) {
+    if (!isExplicitHttpOrigin(origin)) {
+      throw new Error(
+        `CORS_ORIGIN contém uma origem inválida: ${origin}. Use http(s)://host[:porta], sem caminho.`,
+      );
+    }
+  }
+
   return origins;
+}
+
+function isExplicitHttpOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && url.origin === value;
+  } catch {
+    return false;
+  }
 }

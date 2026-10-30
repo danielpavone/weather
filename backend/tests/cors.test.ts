@@ -19,4 +19,10 @@ describe('resolveCorsOrigins', () => {
   it('recusa o curinga *', () => {
     expect(() => resolveCorsOrigins('*')).toThrow(/não aceita \*/);
   });
+
+  it('recusa origem com caminho, barra final ou esquema inválido', () => {
+    expect(() => resolveCorsOrigins('https://clima.example/app')).toThrow(/origem inválida/);
+    expect(() => resolveCorsOrigins('https://clima.example/')).toThrow(/origem inválida/);
+    expect(() => resolveCorsOrigins('clima.example')).toThrow(/origem inválida/);
+  });
 });

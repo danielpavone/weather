@@ -77,19 +77,28 @@ A geocodificação reversa usa `https://nominatim.openstreetmap.org/reverse` ape
 O backend aplica isso assim:
 
 - fila interna com intervalo mínimo de 1 segundo entre chamadas (`NOMINATIM_MIN_INTERVAL_MS`, padrão `1000`);
+- teto dessa fila (`NOMINATIM_MAX_QUEUE`, padrão `8`); acima dele a resposta segue sem o nome da cidade, em vez de esperar sem limite;
 - User-Agent padrão `weather-dashboard/1.0 (https://github.com/danielpavone/weather)`, substituível por `NOMINATIM_USER_AGENT`;
-- cache do nome resolvido por coordenada arredondada (`REVERSE_GEOCODE_CACHE_TTL_MS`, padrão 24 horas);
-- se o Nominatim falhar ou recusar a chamada, o clima da Open-Meteo continua sendo respondido.
+- cache LRU do nome resolvido por coordenada arredondada (`REVERSE_GEOCODE_CACHE_TTL_MS`, padrão 24 horas; `REVERSE_GEOCODE_CACHE_MAX`, padrão `1000`);
+- se o Nominatim falhar, recusar a chamada ou a fila estiver cheia, o clima da Open-Meteo continua sendo respondido.
 
 Atribuição: dados de localização © colaboradores do OpenStreetMap.
 
 ### Cache, limite e CORS
 
-Consultas repetidas à Open-Meteo ficam em cache por cidade (sem diferenciar maiúsculas) ou por coordenada arredondada a duas casas. O tempo padrão é 10 minutos (`WEATHER_CACHE_TTL_MS`).
+Consultas repetidas à Open-Meteo ficam num cache LRU por cidade (sem diferenciar maiúsculas) ou por coordenada. A chave de coordenada arredonda para duas casas decimais (cerca de 1,1 km) só para agrupar pontos próximos; a previsão em si usa a latitude e a longitude exatas. O tempo padrão é 10 minutos (`WEATHER_CACHE_TTL_MS`) e o teto é 1000 entradas (`WEATHER_CACHE_MAX`). Entradas vencidas saem na próxima leitura ou gravação do cache, mesmo que a chave consultada seja outra. Ao passar do teto, sai a entrada usada há mais tempo.
 
 `GET /api/weather` também tem limite por IP: 30 requisições por minuto (`WEATHER_RATE_LIMIT_MAX` e `WEATHER_RATE_LIMIT_WINDOW_MS`). Acima disso a resposta é `429`.
 
-O CORS não reflete qualquer origem. Sem configuração, aceita só `http://localhost:5173` e `http://127.0.0.1:5173`. Em produção defina origens explícitas:
+Atrás de um proxy reverso ou PaaS, o IP do cliente chega em `X-Forwarded-For`. Sem configurar o proxy, o limite enxerga só o IP do balanceador. Defina o número de hops confiáveis (o valor `true` é recusado):
+
+```bash
+TRUST_PROXY=1
+```
+
+O padrão é não confiar em `X-Forwarded-For`.
+
+O CORS não reflete qualquer origem. Sem configuração, aceita só `http://localhost:5173` e `http://127.0.0.1:5173`. Em produção defina origens explícitas, no formato `http(s)://host[:porta]`, sem caminho:
 
 ```bash
 CORS_ORIGIN=https://clima.example

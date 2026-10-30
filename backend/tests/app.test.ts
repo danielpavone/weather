@@ -115,4 +115,59 @@ describe('limite de consultas', () => {
       message: 'Muitas consultas em pouco tempo. Tente novamente em instantes.',
     });
   });
+
+  it('aplica o limite por IP encaminhado quando TRUST_PROXY=1', async () => {
+    const previousLimit = process.env.WEATHER_RATE_LIMIT_MAX;
+    const previousProxy = process.env.TRUST_PROXY;
+    process.env.WEATHER_RATE_LIMIT_MAX = '1';
+    process.env.TRUST_PROXY = '1';
+    const app = createApp();
+    if (previousLimit === undefined) {
+      delete process.env.WEATHER_RATE_LIMIT_MAX;
+    } else {
+      process.env.WEATHER_RATE_LIMIT_MAX = previousLimit;
+    }
+    if (previousProxy === undefined) {
+      delete process.env.TRUST_PROXY;
+    } else {
+      process.env.TRUST_PROXY = previousProxy;
+    }
+
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL) => {
+      const url = String(input);
+      if (url.includes('geocoding-api.open-meteo.com')) {
+        return jsonResponse({
+          results: [{
+            name: 'Recife',
+            latitude: -8.05,
+            longitude: -34.88,
+            country: 'Brasil',
+            admin1: 'Pernambuco',
+            timezone: 'America/Recife',
+          }],
+        });
+      }
+      if (url.includes('api.open-meteo.com')) {
+        return jsonResponse(forecastPayload);
+      }
+      throw new Error(`URL inesperada: ${url}`);
+    }));
+
+    const first = await request(app)
+      .get('/api/weather')
+      .query({ city: 'Recife' })
+      .set('X-Forwarded-For', '203.0.113.10');
+    const other = await request(app)
+      .get('/api/weather')
+      .query({ city: 'Salvador' })
+      .set('X-Forwarded-For', '203.0.113.20');
+    const again = await request(app)
+      .get('/api/weather')
+      .query({ city: 'Curitiba' })
+      .set('X-Forwarded-For', '203.0.113.10');
+
+    expect(first.status).toBe(200);
+    expect(other.status).toBe(200);
+    expect(again.status).toBe(429);
+  });
 });

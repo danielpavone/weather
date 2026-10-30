@@ -297,4 +297,92 @@ describe('GET /api/weather', () => {
     expect(response.body.message).toBe('O nome da cidade pode ter no máximo 100 caracteres.');
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('descarta a cidade menos recente quando o cache passa do teto', async () => {
+    const previous = process.env.WEATHER_CACHE_MAX;
+    process.env.WEATHER_CACHE_MAX = '2';
+
+    try {
+      const fetchMock = mockOpenMeteo();
+      await request(app).get('/api/weather').query({ city: 'Alpha' });
+      await request(app).get('/api/weather').query({ city: 'Bravo' });
+      await request(app).get('/api/weather').query({ city: 'Charlie' });
+      const cached = await request(app).get('/api/weather').query({ city: 'Bravo' });
+      const evicted = await request(app).get('/api/weather').query({ city: 'Alpha' });
+
+      expect(cached.status).toBe(200);
+      expect(evicted.status).toBe(200);
+
+      const cities = fetchMock.mock.calls
+        .map((call) => String(call[0]))
+        .filter((url) => url.includes('geocoding-api.open-meteo.com'))
+        .map((url) => new URL(url).searchParams.get('name'));
+
+      expect(cities).toEqual(['Alpha', 'Bravo', 'Charlie', 'Alpha']);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.WEATHER_CACHE_MAX;
+      } else {
+        process.env.WEATHER_CACHE_MAX = previous;
+      }
+    }
+  });
+
+  it('responde sem o nome da cidade quando a fila do Nominatim está cheia', async () => {
+    const previous = process.env.NOMINATIM_MAX_QUEUE;
+    process.env.NOMINATIM_MAX_QUEUE = '1';
+    let releaseFirst: () => void = () => undefined;
+    const fetchMock = vi.fn(async (input: string | URL) => {
+      const url = String(input);
+
+      if (url.includes('nominatim.openstreetmap.org')) {
+        return new Promise<Response>((resolve) => {
+          releaseFirst = () => resolve(jsonResponse({
+            address: { city: 'São Paulo', state: 'São Paulo', country: 'Brasil' },
+          }));
+        });
+      }
+
+      if (url.includes('api.open-meteo.com')) {
+        return jsonResponse(forecastPayload);
+      }
+
+      throw new Error(`URL inesperada: ${url}`);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    try {
+      const first = request(app)
+        .get('/api/weather')
+        .query({ latitude: '10.10', longitude: '20.20' })
+        .then((response) => response);
+
+      await vi.waitFor(() => {
+        const nominatimCalls = fetchMock.mock.calls
+          .filter((call) => String(call[0]).includes('nominatim.openstreetmap.org'));
+        expect(nominatimCalls).toHaveLength(1);
+      });
+
+      const second = await request(app)
+        .get('/api/weather')
+        .query({ latitude: '11.11', longitude: '21.21' });
+
+      expect(second.status).toBe(200);
+      expect(second.body.location.name).toBeNull();
+      expect(second.body.current.temperature).toBe(27.2);
+      expect(fetchMock.mock.calls.filter((call) => String(call[0]).includes('nominatim.openstreetmap.org'))).toHaveLength(1);
+
+      releaseFirst();
+      const firstResponse = await first;
+      expect(firstResponse.status).toBe(200);
+      expect(firstResponse.body.location.name).toBe('São Paulo');
+    } finally {
+      releaseFirst();
+      if (previous === undefined) {
+        delete process.env.NOMINATIM_MAX_QUEUE;
+      } else {
+        process.env.NOMINATIM_MAX_QUEUE = previous;
+      }
+    }
+  });
 });

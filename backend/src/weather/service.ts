@@ -1,6 +1,7 @@
 import { HttpError } from '../httpError';
 import { describeWeatherCode } from './descriptions';
-import { createRequestGate } from './requestGate';
+import { createRequestGate, QueueFullError } from './requestGate';
+import { TtlLruCache } from './ttlLruCache';
 import type { WeatherQuery, WeatherReport } from './types';
 
 const GEOCODING_API_URL = 'https://geocoding-api.open-meteo.com/v1/search';
@@ -19,21 +20,30 @@ const CURRENT_FIELDS = [
 const REQUEST_TIMEOUT_MS = 10000;
 const DEFAULT_WEATHER_CACHE_TTL_MS = 10 * 60 * 1000;
 const DEFAULT_REVERSE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_CACHE_MAX = 1000;
 const DEFAULT_NOMINATIM_INTERVAL_MS = 1000;
+const DEFAULT_NOMINATIM_MAX_QUEUE = 8;
 const EXTERNAL_FAILURE_MESSAGE =
   'Não foi possível consultar o serviço de clima. Tente novamente em instantes.';
 
-interface CacheEntry<T> {
-  value: T;
-  expiresAt: number;
-}
-
-const weatherCache = new Map<string, CacheEntry<WeatherReport>>();
-const reverseCache = new Map<string, CacheEntry<Pick<ResolvedPlace, 'name' | 'country' | 'admin1'>>>();
-const scheduleNominatim = createRequestGate(() => readNonNegativeInt(
-  process.env.NOMINATIM_MIN_INTERVAL_MS,
-  DEFAULT_NOMINATIM_INTERVAL_MS,
+const weatherCache = new TtlLruCache<WeatherReport>(() => readPositiveInt(
+  process.env.WEATHER_CACHE_MAX,
+  DEFAULT_CACHE_MAX,
 ));
+const reverseCache = new TtlLruCache<Pick<ResolvedPlace, 'name' | 'country' | 'admin1'>>(() => readPositiveInt(
+  process.env.REVERSE_GEOCODE_CACHE_MAX,
+  DEFAULT_CACHE_MAX,
+));
+const scheduleNominatim = createRequestGate({
+  minIntervalMs: () => readNonNegativeInt(
+    process.env.NOMINATIM_MIN_INTERVAL_MS,
+    DEFAULT_NOMINATIM_INTERVAL_MS,
+  ),
+  maxPending: () => readNonNegativeInt(
+    process.env.NOMINATIM_MAX_QUEUE,
+    DEFAULT_NOMINATIM_MAX_QUEUE,
+  ),
+});
 
 function readNonNegativeInt(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim() === '') {
@@ -48,32 +58,25 @@ function readNonNegativeInt(raw: string | undefined, fallback: number): number {
   return value;
 }
 
-function readCache<T>(cache: Map<string, CacheEntry<T>>, key: string): T | undefined {
-  const entry = cache.get(key);
-  if (!entry) {
-    return undefined;
+function readPositiveInt(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === '') {
+    return fallback;
   }
 
-  if (entry.expiresAt <= Date.now()) {
-    cache.delete(key);
-    return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    return fallback;
   }
 
-  return entry.value;
-}
-
-function writeCache<T>(cache: Map<string, CacheEntry<T>>, key: string, value: T, ttlMs: number): void {
-  if (ttlMs <= 0) {
-    return;
-  }
-
-  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+  return value;
 }
 
 function cityCacheKey(city: string): string {
   return `city:${city.toLocaleLowerCase('pt-BR')}`;
 }
 
+// Duas casas decimais (~1,1 km) agrupam coordenadas próximas na mesma chave.
+// A consulta à Open-Meteo continua usando a latitude e a longitude exatas.
 function coordinateCacheKey(latitude: number, longitude: number): string {
   return `coords:${latitude.toFixed(2)}:${longitude.toFixed(2)}`;
 }
@@ -283,22 +286,29 @@ async function reverseGeocode(
   longitude: number,
 ): Promise<Pick<ResolvedPlace, 'name' | 'country' | 'admin1'> | null> {
   const key = coordinateCacheKey(latitude, longitude);
-  const cached = readCache(reverseCache, key);
+  const cached = reverseCache.get(key);
   if (cached) {
     return cached;
   }
 
-  const place = await scheduleNominatim(() => requestReverseGeocode(latitude, longitude));
-  if (place) {
-    writeCache(
-      reverseCache,
-      key,
-      place,
-      readNonNegativeInt(process.env.REVERSE_GEOCODE_CACHE_TTL_MS, DEFAULT_REVERSE_CACHE_TTL_MS),
-    );
-  }
+  try {
+    const place = await scheduleNominatim(() => requestReverseGeocode(latitude, longitude));
+    if (place) {
+      reverseCache.set(
+        key,
+        place,
+        readNonNegativeInt(process.env.REVERSE_GEOCODE_CACHE_TTL_MS, DEFAULT_REVERSE_CACHE_TTL_MS),
+      );
+    }
 
-  return place;
+    return place;
+  } catch (error) {
+    if (error instanceof QueueFullError) {
+      return null;
+    }
+
+    throw error;
+  }
 }
 
 async function fetchForecast(
@@ -378,8 +388,7 @@ function toReport(
 }
 
 function rememberWeather(key: string, report: WeatherReport): WeatherReport {
-  writeCache(
-    weatherCache,
+  weatherCache.set(
     key,
     report,
     readNonNegativeInt(process.env.WEATHER_CACHE_TTL_MS, DEFAULT_WEATHER_CACHE_TTL_MS),
@@ -396,7 +405,7 @@ export async function getCurrentWeather(query: WeatherQuery): Promise<WeatherRep
 
   if (city.length >= 2) {
     const key = cityCacheKey(city);
-    const cached = readCache(weatherCache, key);
+    const cached = weatherCache.get(key);
     if (cached) {
       return cached;
     }
@@ -422,7 +431,7 @@ export async function getCurrentWeather(query: WeatherQuery): Promise<WeatherRep
   }
 
   const key = coordinateCacheKey(latitude, longitude);
-  const cached = readCache(weatherCache, key);
+  const cached = weatherCache.get(key);
   if (cached) {
     return cached;
   }
